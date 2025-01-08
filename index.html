@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Image Crypto App</title>
+    <style>
+        body {
+            font-family: system-ui, sans-serif;
+            max-width: 800px;
+            margin: 20px auto;
+            padding: 20px;
+        }
+        .container {
+            border: 1px solid #ccc;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+        button {
+            background: #0070f3;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin: 5px;
+        }
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        img {
+            max-width: 100%;
+            margin: 10px 0;
+        }
+        .error {
+            color: red;
+            margin: 10px 0;
+        }
+        .success {
+            color: green;
+            margin: 10px 0;
+        }
+        .key-input {
+            width: 100%;
+            padding: 8px;
+            margin: 5px 0;
+            font-family: monospace;
+        }
+        .radio-group {
+            margin: 10px 0;
+        }
+        .input-group {
+            margin: 10px 0;
+            padding: 10px;
+            background: #f5f5f5;
+            border-radius: 4px;
+        }
+        label {
+            display: block;
+            margin: 5px 0;
+        }
+    </style>
+</head>
+<body>
+    <h1>Image Encryption/Decryption</h1>
+    
+    <!-- Encryption Section -->
+    <div class="container">
+        <h2>Encrypt Image</h2>
+        <input type="file" id="imageInput" accept="image/*">
+        <div id="originalImagePreview"></div>
+
+        <div class="radio-group">
+            <label>
+                <input type="radio" name="keyMode" value="generate" checked> Generate new key and IV
+            </label>
+            <label>
+                <input type="radio" name="keyMode" value="manual"> Provide key and IV
+            </label>
+        </div>
+
+        <div id="manualKeyInputs" class="input-group" style="display: none;">
+            <label>Key (32 bytes in hex):</label>
+            <input type="text" id="manualKey" class="key-input" placeholder="32 bytes hex (64 characters): e.g., 000102...">
+            <label>IV (16 bytes in hex):</label>
+            <input type="text" id="manualIV" class="key-input" placeholder="16 bytes hex (32 characters): e.g., 000102...">
+            <div id="keyValidation" class="error"></div>
+        </div>
+
+        <button id="encryptBtn" disabled>Encrypt and Download</button>
+        <div id="encryptError" class="error"></div>
+        <div id="encryptSuccess" class="success"></div>
+    </div>
+
+    <!-- Decryption Section -->
+    <div class="container">
+        <h2>Decrypt Image</h2>
+        <input type="file" id="encryptedInput" accept="application/json">
+        <button id="decryptBtn" disabled>Decrypt</button>
+        <div id="decryptedImagePreview"></div>
+        <div id="decryptError" class="error"></div>
+    </div>
+
+    <script>
+        // Utility functions
+        function hexToUint8Array(hex) {
+            if (!/^[0-9a-fA-F]+$/.test(hex)) {
+                throw new Error('Invalid hex string');
+            }
+            return new Uint8Array(hex.match(/.{1,2}/g).map(byte => parseInt(byte, 16)));
+        }
+
+        async function generateKey() {
+            return await window.crypto.subtle.generateKey(
+                {
+                    name: "AES-CBC",
+                    length: 256
+                },
+                true,
+                ["encrypt", "decrypt"]
+            );
+        }
+
+        async function createKeyFromHex(hexKey) {
+            const keyData = hexToUint8Array(hexKey);
+            return await window.crypto.subtle.importKey(
+                "raw",
+                keyData,
+                "AES-CBC",
+                true,
+                ["encrypt", "decrypt"]
+            );
+        }
+
+        async function exportKey(key) {
+            return await window.crypto.subtle.exportKey("raw", key);
+        }
+
+        async function importKey(rawKey) {
+            return await window.crypto.subtle.importKey(
+                "raw",
+                rawKey,
+                "AES-CBC",
+                true,
+                ["encrypt", "decrypt"]
+            );
+        }
+
+        function arrayBufferToBase64(buffer) {
+            return btoa(String.fromCharCode(...new Uint8Array(buffer)));
+        }
+
+        function base64ToArrayBuffer(base64) {
+            const binaryString = atob(base64);
+            const bytes = new Uint8Array(binaryString.length);
+            for (let i = 0; i < binaryString.length; i++) {
+                bytes[i] = binaryString.charCodeAt(i);
+            }
+            return bytes.buffer;
+        }
+
+        function arrayBufferToHex(buffer) {
+            return Array.from(new Uint8Array(buffer))
+                .map(b => b.toString(16).padStart(2, '0'))
+                .join('');
+        }
+
+        // File handling
+        async function readFileAsArrayBuffer(file) {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = () => resolve(reader.result);
+                reader.onerror = reject;
+                reader.readAsArrayBuffer(file);
+            });
+        }
+
+        // UI handling
+        document.querySelectorAll('input[name="keyMode"]').forEach(radio => {
+            radio.addEventListener('change', (e) => {
+                const manualInputs = document.getElementById('manualKeyInputs');
+                manualInputs.style.display = e.target.value === 'manual' ? 'block' : 'none';
+            });
+        });
+
+        // Validation
+        function validateKeyInput() {
+            const keyInput = document.getElementById('manualKey');
+            const ivInput = document.getElementById('manualIV');
+            const validation = document.getElementById('keyValidation');
+            const keyHex = keyInput.value.replace(/\s/g, '');
+            const ivHex = ivInput.value.replace(/\s/g, '');
+
+            try {
+                if (keyHex.length !== 64) {
+                    throw new Error('Key must be exactly 32 bytes (64 hex characters)');
+                }
+                if (ivHex.length !== 32) {
+                    throw new Error('IV must be exactly 16 bytes (32 hex characters)');
+                }
+                if (!/^[0-9a-fA-F]+$/.test(keyHex) || !/^[0-9a-fA-F]+$/.test(ivHex)) {
+                    throw new Error('Invalid hex characters');
+                }
+                validation.textContent = '';
+                return true;
+            } catch (error) {
+                validation.textContent = error.message;
+                return false;
+            }
+        }
+
+        document.getElementById('manualKey').addEventListener('input', validateKeyInput);
+        document.getElementById('manualIV').addEventListener('input', validateKeyInput);
+
+        // Encryption handling
+        document.getElementById('imageInput').addEventListener('change', async (e) => {
+            const file = e.target.files[0];
+            if (file) {
+                const img = document.createElement('img');
+                img.src = URL.createObjectURL(file);
+                document.getElementById('originalImagePreview').innerHTML = '';
+                document.getElementById('originalImagePreview').appendChild(img);
+                document.getElementById('encryptBtn').disabled = false;
+            }
+        });
+
+        document.getElementById('encryptBtn').addEventListener('click', async () => {
+            try {
+                const file = document.getElementById('imageInput').files[0];
+                const imageData = await readFileAsArrayBuffer(file);
+                const useManualKey = document.querySelector('input[name="keyMode"]:checked').value === 'manual';
+                
+                let key, iv;
+                if (useManualKey) {
+                    if (!validateKeyInput()) {
+                        throw new Error('Invalid key or IV');
+                    }
+                    const keyHex = document.getElementById('manualKey').value.replace(/\s/g, '');
+                    const ivHex = document.getElementById('manualIV').value.replace(/\s/g, '');
+                    key = await createKeyFromHex(keyHex);
+                    iv = hexToUint8Array(ivHex);
+                } else {
+                    key = await generateKey();
+                    iv = window.crypto.getRandomValues(new Uint8Array(16));
+                }
+
+                // Encrypt the image
+                const encryptedData = await window.crypto.subtle.encrypt(
+                    {
+                        name: "AES-CBC",
+                        iv: iv
+                    },
+                    key,
+                    imageData
+                );
+
+                // Export the key
+                const exportedKey = await exportKey(key);
+
+                // Create the result object
+                const result = {
+                    encryptedData: arrayBufferToBase64(encryptedData),
+                    key: arrayBufferToBase64(exportedKey),
+                    iv: arrayBufferToBase64(iv.buffer),
+                    originalFileName: file.name
+                };
+
+                // Download the JSON file
+                const blob = new Blob([JSON.stringify(result)], { type: 'application/json' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = 'encrypted-image.json';
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+
+                // Show the used key and IV
+                const keyHex = arrayBufferToHex(exportedKey);
+                const ivHex = arrayBufferToHex(iv);
+                document.getElementById('encryptSuccess').innerHTML = 
+                    `Encryption successful!<br>Key: ${keyHex}<br>IV: ${ivHex}`;
+
+            } catch (error) {
+                document.getElementById('encryptError').textContent = `Encryption error: ${error.message}`;
+            }
+        });
+
+        // Decryption handling
+        document.getElementById('encryptedInput').addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (file) {
+                document.getElementById('decryptBtn').disabled = false;
+            }
+        });
+
+        document.getElementById('decryptBtn').addEventListener('click', async () => {
+            try {
+                const file = document.getElementById('encryptedInput').files[0];
+                const fileContent = await file.text();
+                const encryptedData = JSON.parse(fileContent);
+
+                // Convert base64 data back to ArrayBuffer
+                const encrypted = base64ToArrayBuffer(encryptedData.encryptedData);
+                const keyData = base64ToArrayBuffer(encryptedData.key);
+                const iv = base64ToArrayBuffer(encryptedData.iv);
+
+                // Import the key
+                const key = await importKey(keyData);
+
+                // Decrypt the data
+                const decryptedData = await window.crypto.subtle.decrypt(
+                    {
+                        name: "AES-CBC",
+                        iv: iv
+                    },
+                    key,
+                    encrypted
+                );
+
+                // Create and display the decrypted image
+                const blob = new Blob([decryptedData], { type: 'image/jpeg' });
+                const img = document.createElement('img');
+                img.src = URL.createObjectURL(blob);
+                document.getElementById('decryptedImagePreview').innerHTML = '';
+                document.getElementById('decryptedImagePreview').appendChild(img);
+
+            } catch (error) {
+                document.getElementById('decryptError').textContent = `Decryption error: ${error.message}`;
+            }
+        });
+    </script>
+</body>
+</html>
